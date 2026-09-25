@@ -4,6 +4,8 @@ Pick a wallpaper from a grid; it becomes your background and the whole Omarchy
 palette (terminals, bar, Hyprland borders, btop, editors, …) is generated from
 it, using the selected color profile.
 
+![Wallsync](screenshot.png)
+
 ## Install
 
 ```sh
