@@ -1,0 +1,51 @@
+#!/bin/bash
+# List wallpapers as "<image>\t<thumbnail>" lines, making any missing thumbnails.
+#
+# Usage: wallsync-list [dir]
+# Default dir: $WALLSYNC_DIR, else the first of ~/Pictures/Wallpapers,
+# ~/Pictures/wallpapers, ~/pictures/wallpapers that exists.
+set -uo pipefail
+
+dir=${1:-${WALLSYNC_DIR:-}}
+if [[ -z $dir ]]; then
+  for d in ~/Pictures/Wallpapers ~/Pictures/wallpapers ~/pictures/wallpapers; do
+    [[ -d $d ]] && { dir=$d; break; }
+  done
+fi
+[[ -n $dir && -d $dir ]] || { echo "no wallpaper directory found" >&2; exit 1; }
+
+cache="$HOME/.cache/jgarza.wallsync/thumbs"
+mkdir -p "$cache"
+
+thumb_for() {
+  # Key on path + mtime so an edited image gets a fresh thumbnail.
+  local key
+  key=$(printf '%s:%s' "$1" "$(stat -c %Y "$1")" | md5sum | cut -c1-16)
+  echo "$cache/$key.jpg"
+}
+
+mapfile -d '' -t images < <(
+  find -L "$dir" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' \) \
+    -print0 | sort -z
+)
+
+missing=()
+for img in "${images[@]}"; do
+  t=$(thumb_for "$img")
+  [[ -s $t ]] || missing+=("$img"$'\t'"$t")
+done
+
+if (( ${#missing[@]} > 0 )); then
+  printf '%s\n' "${missing[@]}" |
+    xargs -P "$(nproc)" -I{} bash -c '
+      IFS=$'"'"'\t'"'"' read -r src dst <<<"$1"
+      magick "$src[0]" -thumbnail "480x270^" -gravity center -extent 480x270 -quality 85 "$dst" 2>/dev/null
+    ' _ {}
+fi
+
+for img in "${images[@]}"; do
+  t=$(thumb_for "$img")
+  [[ -s $t ]] || t=$img
+  printf '%s\t%s\n' "$img" "$t"
+done

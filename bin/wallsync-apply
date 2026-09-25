@@ -1,0 +1,33 @@
+#!/bin/bash
+# Apply a wallpaper and the palette derived from it as the "wallsync" theme.
+#
+# Usage: wallsync-apply <image> [profile]
+#
+# Writes ~/.config/omarchy/themes/wallsync/{colors.toml,backgrounds/<image>}
+# and runs `omarchy theme set wallsync`, which regenerates every app config from
+# colors.toml and switches the background with the usual transition.
+set -euo pipefail
+
+image=$(realpath "${1:?usage: wallsync-apply <image> [profile]}")
+profile=${2:-source}
+here=$(cd "$(dirname "$0")" && pwd)
+theme_dir="$HOME/.config/omarchy/themes/wallsync"
+state_dir="$HOME/.config/omarchy/jgarza.wallsync"
+
+[[ -f $image ]] || { echo "no such image: $image" >&2; exit 1; }
+
+colors=$(python3 "$here/wallsync-palette" "$image" "$profile")
+
+mkdir -p "$theme_dir/backgrounds" "$state_dir"
+printf '%s' "$colors" >"$theme_dir/colors.toml"
+
+# Exactly one background, so theme-set always picks this image.
+find "$theme_dir/backgrounds" -mindepth 1 -delete
+ext=${image##*.}
+ln "$image" "$theme_dir/backgrounds/wallpaper.$ext" 2>/dev/null ||
+  cp "$image" "$theme_dir/backgrounds/wallpaper.$ext"
+
+python3 -c 'import json,sys; print(json.dumps({"image": sys.argv[1], "profile": sys.argv[2]}))' \
+  "$image" "$profile" >"$state_dir/state.json"
+
+omarchy theme set wallsync

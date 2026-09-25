@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Derive an Omarchy colors.toml palette from an image.
+
+Usage: wallsync-palette <image> [profile] [--json]
+
+Profiles (same directions as Omagen): source, calm, mute, deep, vibrant, balanced
+
+How it works
+  1. Sample: ImageMagick quantizes the image to a weighted histogram.
+  2. Key colors, in OKLCH (perceptual lightness / chroma / hue):
+       dominant  – the most-used color; drives the background hue and mode
+       vivid     – the most saturated color that still covers a real share of
+                   the image; becomes the accent
+  3. Source palette: backgrounds from `dominant`, accent from `vivid`, and each
+     ANSI slot takes the image's own color nearest that hue (weighted by
+     usage x saturation), falling back to the canonical hue at the image's
+     typical saturation.
+  4. Profile: Omagen-style transform of the Source palette (chroma scale /
+     blend toward a target, lightness spread, background lightness target).
+  5. Contrast: WCAG ratios against the background are enforced by moving
+     lightness only, so hues and saturation survive.
+
+Prints colors.toml to stdout (or a JSON object of the same keys with --json).
+"""
+import json
+import math
+import re
+import subprocess
+import sys
+
+# ── Color math (sRGB <-> OKLab <-> OKLCH) ─────────────────────────────────────
+
+
+def _lin(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _gam(c):
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def rgb_to_oklch(r, g, b):
+    r, g, b = _lin(r), _lin(g), _lin(b)
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+    a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+    bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    return [L, math.hypot(a, bb), math.degrees(math.atan2(bb, a)) % 360]
+
+
+def _oklch_to_linear(L, C, H):
+    a, b = C * math.cos(math.radians(H)), C * math.sin(math.radians(H))
+    l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    return (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+
+
+def oklch_to_rgb(L, C, H):
+    """Gamut-map by reducing chroma (keeps lightness and hue)."""
+    L = clamp(L)
+    lo, hi = 0.0, max(0.0, C)
+    rgb = _oklch_to_linear(L, hi, H)
+    if all(-1e-4 <= v <= 1 + 1e-4 for v in rgb):
+        return tuple(_gam(clamp(v)) for v in rgb)
+    for _ in range(22):
+        mid = (lo + hi) / 2
+        if all(-1e-4 <= v <= 1 + 1e-4 for v in _oklch_to_linear(L, mid, H)):
+            lo = mid
+        else:
+            hi = mid
+    return tuple(_gam(clamp(v)) for v in _oklch_to_linear(L, lo, H))
+
+
+def to_hex(c):
+    return "#%02x%02x%02x" % tuple(round(v * 255) for v in oklch_to_rgb(*c))
+
+
+def luminance(c):
+    r, g, b = (_lin(v) for v in oklch_to_rgb(*c))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    la, lb = luminance(a), luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def clamp(v, lo=0.0, hi=1.0):
+    return max(lo, min(hi, v))
+
+
+def hue_dist(a, b):
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+# ── Sampling ─────────────────────────────────────────────────────────────────
+
+
+def sample(path):
+    out = subprocess.run(
+        ["magick", path + "[0]", "-resize", "200x200>", "-colors", "32",
+         "-depth", "8", "-format", "%c", "histogram:info:-"],
+        capture_output=True, text=True, check=True).stdout
+    colors = []
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+):.*#([0-9A-Fa-f]{6})", line)
+        if m:
+            hx = m.group(2)
+            lch = rgb_to_oklch(*(int(hx[i:i + 2], 16) / 255 for i in (0, 2, 4)))
+            colors.append({"n": int(m.group(1)), "lch": lch})
+    if not colors:
+        raise SystemExit("no colors sampled from " + path)
+    total = sum(c["n"] for c in colors)
+    for c in colors:
+        c["w"] = c["n"] / total
+    return colors
+
+
+# ── Source palette ───────────────────────────────────────────────────────────
+
+# OKLCH hues of the ANSI slots.
+SLOTS = {"red": 27, "orange": 55, "yellow": 95, "green": 142,
+         "cyan": 195, "blue": 258, "magenta": 330}
+SLOT_WINDOW = 28          # how far (deg) an image color may pull a slot
+
+
+def key_colors(colors):
+    dominant = max(colors, key=lambda c: c["w"])["lch"]
+
+    # Most saturated color that isn't a speck: chroma weighted by a soft
+    # power of its share, ignoring near-black / near-white.
+    usable = [c for c in colors if 0.25 < c["lch"][0] < 0.95] or colors
+    vivid = max(usable, key=lambda c: c["lch"][1] ** 1.5 * c["w"] ** 0.15)["lch"]
+    return dominant, vivid
+
+
+def source_palette(colors):
+    dominant, vivid = key_colors(colors)
+    avg_l = sum(c["lch"][0] * c["w"] for c in colors)
+    mode = "light" if avg_l > 0.72 else "dark"
+    dark = mode == "dark"
+
+    # Typical saturation of the image: fallback chroma for missing slots.
+    chromas = sorted(c["lch"][1] for c in colors if c["lch"][1] > 0.03)
+    typical_c = chromas[len(chromas) // 2] if chromas else 0.08
+    typical_c = clamp(typical_c, 0.07, 0.16)
+
+    bg_h = dominant[2]
+    bg_c = min(dominant[1] * 0.45, 0.045)
+    bg_l = clamp(dominant[0] * 0.5, 0.13, 0.24) if dark else clamp(dominant[0], 0.90, 0.96)
+    s = 1 if dark else -1          # +1 = away from the background, toward text
+
+    acc_c = vivid[1] if vivid[1] > 0.05 else typical_c
+    acc_h = vivid[2] if vivid[1] > 0.05 else SLOTS["blue"]
+
+    p = {"mode": mode}
+    p["background"] = [bg_l, bg_c, bg_h]
+    p["dark_background"] = [bg_l - 0.03, bg_c, bg_h]
+    p["darker_background"] = [bg_l - 0.055, bg_c, bg_h]
+    p["lighter_background"] = [bg_l + 0.06 * s, bg_c * 1.1, bg_h]
+    p["selection"] = [bg_l + 0.14 * s, max(bg_c, acc_c * 0.35), acc_h]
+    p["muted"] = [bg_l + 0.30 * s, bg_c * 0.8, bg_h]
+
+    fg_l = 0.90 if dark else 0.28
+    fg_c = min(bg_c * 0.5, 0.02)
+    p["foreground"] = [fg_l, fg_c, bg_h]
+    p["dark_foreground"] = [fg_l - 0.28 * s, fg_c, bg_h]
+    p["light_foreground"] = [fg_l + 0.04, fg_c, bg_h]
+    p["bright_foreground"] = [0.96 if dark else fg_l - 0.06, fg_c * 0.6, bg_h]
+
+    p["accent"] = [0.74 if dark else 0.52, acc_c, acc_h]
+
+    # ANSI: the image's own color nearest each slot, else canonical hue.
+    slot_l = 0.72 if dark else 0.52
+    taken = []
+    for name, target in SLOTS.items():
+        near = [c for c in colors
+                if hue_dist(c["lch"][2], target) <= SLOT_WINDOW and c["lch"][1] > 0.04]
+        if near:
+            best = max(near, key=lambda c: c["w"] * c["lch"][1])["lch"]
+            h, ch = best[2], max(best[1], typical_c * 0.8)
+        else:
+            h, ch = target, typical_c
+        # Keep slots distinguishable: never closer than 18deg to a taken slot.
+        if any(hue_dist(h, t) < 18 for t in taken):
+            h = target
+        taken.append(h)
+        p[name] = [slot_l, ch, h]
+    p["brown"] = [0.48 if dark else 0.42, p["orange"][1] * 0.5, p["orange"][2]]
+    for name in ("red", "yellow", "green", "cyan", "blue", "magenta"):
+        l, c, h = p[name]
+        p["bright_" + name] = [l + 0.08 * s, c * 1.1, h]
+    return p
+
+
+# ── Profiles (Omagen-style transforms of the Source palette) ─────────────────
+#
+# Per role: chroma = chroma*scale, then blended `blend` of the way toward
+# `target`; lightness distance from the background is multiplied by `spread`.
+# bg: (target L, blend) — how far the background lightness moves.
+
+def T(scale=1.0, target=0.0, blend=0.0, spread=1.0):
+    return {"scale": scale, "target": target, "blend": blend, "spread": spread}
+
+
+PROFILES = {
+    "source": {"dark": {}, "light": {}},
+    "calm": {
+        "dark": {"bg": (0.18, 0.0), "surface": T(0.72, spread=0.84), "accent": T(0.78),
+                 "selection": T(0.72, spread=0.88), "muted": T(0.72),
+                 "ansi": T(0.78), "bright": T(0.82)},
+        "light": {"bg": (0.93, 0.35), "surface": T(0.58, spread=0.84), "accent": T(0.68),
+                  "selection": T(0.60, spread=0.86), "muted": T(0.60),
+                  "ansi": T(0.70), "bright": T(0.76)},
+    },
+    "mute": {
+        "dark": {"bg": (0.18, 0.0), "surface": T(0.38, spread=0.72), "accent": T(0.52, spread=0.96),
+                 "selection": T(0.42, spread=0.78), "muted": T(0.35, spread=0.96),
+                 "ansi": T(0.52, spread=0.96), "bright": T(0.60, spread=0.98)},
+        "light": {"bg": (0.89, 0.60), "surface": T(0.20, spread=0.74), "accent": T(0.28, spread=0.95),
+                  "selection": T(0.22, spread=0.80), "muted": T(0.20, spread=0.95),
+                  "ansi": T(0.35, spread=0.95), "bright": T(0.42, spread=0.97)},
+    },
+    "deep": {
+        "dark": {"bg": (0.12, 0.60), "surface": T(1.10, spread=1.40), "accent": T(1.08, spread=1.08),
+                 "selection": T(1.08, spread=1.22), "muted": T(0.95),
+                 "ansi": T(1.04, spread=1.05), "bright": T(1.06, spread=1.07)},
+        "light": {"bg": (0.82, 0.65), "surface": T(1.08, spread=1.22), "accent": T(1.12, spread=1.08),
+                  "selection": T(1.08, spread=1.14), "muted": T(0.95),
+                  "ansi": T(1.05, spread=1.04), "bright": T(1.08, spread=1.05)},
+    },
+    "vibrant": {
+        "dark": {"bg": (0.18, 0.0), "surface": T(1.08, 0.075, 0.42, 1.02),
+                 "accent": T(1.10, 0.20, 0.65, 1.02), "selection": T(1.08, 0.11, 0.48, 1.04),
+                 "muted": T(0.95, 0.045, 0.20), "ansi": T(1.08, 0.17, 0.60),
+                 "bright": T(1.10, 0.19, 0.62)},
+        "light": {"bg": (0.91, 0.20), "surface": T(1.08, 0.065, 0.55, 1.02),
+                  "accent": T(1.10, 0.18, 0.72), "selection": T(1.08, 0.095, 0.58, 1.02),
+                  "muted": T(0.95, 0.040, 0.20), "ansi": T(1.08, 0.15, 0.68),
+                  "bright": T(1.10, 0.17, 0.70)},
+    },
+    "balanced": {
+        "dark": {"bg": (0.16, 0.46), "surface": T(1.0, 0.045, 0.42, 1.04),
+                 "accent": T(1.0, 0.135, 0.52), "selection": T(1.0, 0.075, 0.46, 1.04),
+                 "muted": T(1.0, 0.028, 0.34), "ansi": T(1.0, 0.115, 0.48),
+                 "bright": T(1.0, 0.135, 0.50)},
+        "light": {"bg": (0.89, 0.46), "surface": T(1.0, 0.038, 0.40, 1.04),
+                  "accent": T(1.0, 0.115, 0.52), "selection": T(1.0, 0.065, 0.46, 1.02),
+                  "muted": T(1.0, 0.025, 0.34), "ansi": T(1.0, 0.105, 0.50),
+                  "bright": T(1.0, 0.125, 0.52)},
+    },
+}
+
+ROLE_OF = {
+    "dark_background": "surface", "darker_background": "surface",
+    "lighter_background": "surface", "accent": "accent", "selection": "selection",
+    "muted": "muted", "brown": "ansi",
+    **{k: "ansi" for k in SLOTS},
+    **{"bright_" + k: "bright" for k in ("red", "yellow", "green", "cyan", "blue", "magenta")},
+}
+
+
+def apply_profile(src, profile):
+    prof = PROFILES[profile][src["mode"]]
+    if not prof:
+        return {k: (list(v) if isinstance(v, list) else v) for k, v in src.items()}
+
+    def chroma(c, t):
+        c *= t["scale"]
+        return max(0.0, c + (t["target"] - c) * t["blend"])
+
+    src_bg_l = src["background"][0]
+    target_l, blend = prof["bg"]
+    new_bg_l = src_bg_l + (target_l - src_bg_l) * blend
+
+    out = {"mode": src["mode"]}
+    l, c, h = src["background"]
+    out["background"] = [new_bg_l, chroma(c, prof["surface"]), h]
+    for key, val in src.items():
+        if key in ("mode", "background"):
+            continue
+        l, c, h = val
+        role = ROLE_OF.get(key)
+        if role is None:          # foregrounds: keep their offset from the bg
+            out[key] = [clamp(new_bg_l + (l - src_bg_l)), c, h]
+            continue
+        t = prof[role]
+        out[key] = [clamp(new_bg_l + (l - src_bg_l) * t["spread"]), chroma(c, t), h]
+    return out
+
+
+# ── Contrast ─────────────────────────────────────────────────────────────────
+
+MIN_CONTRAST = {
+    "foreground": 4.5, "light_foreground": 4.5, "bright_foreground": 7.0,
+    "dark_foreground": 3.0, "accent": 3.0, "muted": 2.2,
+    **{k: 3.0 for k in SLOTS}, "brown": 2.2,
+    **{"bright_" + k: 4.5 for k in ("red", "yellow", "green", "cyan", "blue", "magenta")},
+}
+
+
+def enforce_contrast(p):
+    bg = p["background"]
+    away = 1 if p["mode"] == "dark" else -1
+    for key, need in MIN_CONTRAST.items():
+        col = p[key]
+        for _ in range(60):
+            if contrast(col, bg) >= need or not (0.0 < col[0] < 1.0):
+                break
+            col[0] = clamp(col[0] + 0.01 * away)
+    # Text must stay readable on the selection too.
+    sel = p["selection"]
+    for _ in range(40):
+        if contrast(p["foreground"], sel) >= 4.5:
+            break
+        sel[0] = clamp(sel[0] - 0.01 * away)
+    return p
+
+
+# ── Output ───────────────────────────────────────────────────────────────────
+
+ORDER = [
+    ["mode"],
+    ["accent", "selection", "muted"],
+    ["background", "dark_background", "darker_background", "lighter_background"],
+    ["foreground", "dark_foreground", "light_foreground", "bright_foreground"],
+    ["red", "yellow", "orange", "green", "cyan", "blue", "magenta", "brown"],
+    ["bright_red", "bright_yellow", "bright_green", "bright_cyan", "bright_blue",
+     "bright_magenta"],
+]
+
+
+def build(path, profile):
+    p = enforce_contrast(apply_profile(source_palette(sample(path)), profile))
+    return {k: (v if k == "mode" else to_hex(v)) for k, v in p.items()}
+
+
+def to_toml(p):
+    return "\n\n".join("\n".join('%s = "%s"' % (k, p[k]) for k in group)
+                       for group in ORDER) + "\n"
+
+
+def main(argv):
+    args = [a for a in argv if not a.startswith("--")]
+    if not args:
+        raise SystemExit(__doc__)
+    profile = args[1] if len(args) > 1 else "source"
+    if profile not in PROFILES:
+        raise SystemExit("unknown profile %r (have: %s)" % (profile, ", ".join(PROFILES)))
+    p = build(args[0], profile)
+    sys.stdout.write(json.dumps(p) + "\n" if "--json" in argv else to_toml(p))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

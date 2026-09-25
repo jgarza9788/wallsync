@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "jgarza.wallsync",
+  "name": "Wallsync",
+  "version": "0.1.0",
+  "author": "jgarza",
+  "license": "MIT",
+  "description": "Pick a wallpaper from a grid of ~/Pictures/Wallpapers; it becomes the background and the whole Omarchy palette is generated from it, with a choice of color profiles.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Wallsync.qml"
+  }
+}

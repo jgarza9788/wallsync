@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Wallsync
+Comment=Pick a wallpaper and theme Omarchy to match it
+Exec=sh -c 'omarchy-shell shell toggle jgarza.wallsync "{}"'
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=wallpaper;background;theme;colors;palette;
