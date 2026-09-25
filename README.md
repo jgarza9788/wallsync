@@ -4,11 +4,16 @@ Pick a wallpaper from a grid; it becomes your background and the whole Omarchy
 palette (terminals, bar, Hyprland borders, btop, editors, …) is generated from
 it, using the selected color profile.
 
-## Open it
+## Install
 
 ```sh
-~/.config/omarchy/plugins/wallsync/extras/install.sh   # once: menu + launcher entry
+omarchy plugin add https://github.com/jgarza9788/wallsync.git --enable
+~/.config/omarchy/plugins/jgarza.wallsync/extras/install.sh   # once: menu + launcher entry
 ```
+
+Requires `magick` (ImageMagick) and `python3`, both standard on Omarchy.
+
+## Open it
 
 - `SUPER+SPACE` → **Wallsync**
 - `omarchy-shell shell toggle jgarza.wallsync '{}'` (bind this to a key if you like)
@@ -56,7 +61,5 @@ table in `bin/wallsync-palette`.
   `~/.config/omarchy/themes/wallsync/` (colors.toml + the one background) and runs
   `omarchy theme set wallsync`, which regenerates every app config from the
   palette. The last choice is saved in `~/.config/omarchy/jgarza.wallsync/state.json`.
-
-Requires `magick` (ImageMagick) and `python3`, both standard on Omarchy.
 
 To go back to a regular theme: `omarchy theme set <name>`.
