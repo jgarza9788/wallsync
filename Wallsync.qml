@@ -23,7 +23,9 @@ Item {
 
   // ── Paths ────────────────────────────────────────────────────────────────
   readonly property string homeDir: Quickshell.env("HOME")
-  readonly property string statePath: homeDir + "/.config/omarchy/jgarza.wallsync/state.json"
+  readonly property string stateDir: homeDir + "/.config/omarchy/jgarza.wallsync"
+  readonly property string statePath: stateDir + "/state.json"
+  readonly property string favoritesPath: stateDir + "/favorites.json"
   function binPath(name) { return Qt.resolvedUrl("bin/" + name).toString().replace(/^file:\/\//, ""); }
 
   readonly property var profiles: [
@@ -47,6 +49,19 @@ Item {
   property bool applying: false
   property var preview: ({})          // palette of the cursor image under `profile`
   property string toastText: ""
+  property var favorites: []          // image paths pinned to the top of the grid
+  property var entries: []            // last listing, in name order
+  property int favCount: 0            // favorites present in the listing
+
+  // Damped springs sampled into Bézier splines (Qt has no spring easing).
+  // smooth: damping 0.86, response 0.5s → ~700ms, 0.5% overshoot (moves, scroll)
+  // snappy: damping 0.72, response 0.35s → ~560ms, 4% overshoot (lift, star pop)
+  readonly property var springSmooth: [0.0120, 0.0000, 0.0239, 0.0162, 0.0359, 0.0413, 0.0602, 0.0921, 0.0845, 0.1775, 0.1088, 0.2635, 0.1419, 0.3805, 0.1751, 0.4988, 0.2082, 0.5938, 0.2487, 0.7102, 0.2893, 0.7944, 0.3299, 0.8522, 0.3771, 0.9194, 0.4242, 0.9531, 0.4714, 0.9731, 0.5246, 0.9956, 0.5779, 1.0011, 0.6311, 1.0036, 0.6899, 1.0063, 0.7488, 1.0048, 0.8076, 1.0038, 0.8718, 1.0026, 0.9359, 1.0016, 1.0000, 1.0000]
+  readonly property var springSnappy: [0.0120, 0.0000, 0.0239, 0.0216, 0.0359, 0.0549, 0.0602, 0.1227, 0.0845, 0.2362, 0.1088, 0.3469, 0.1419, 0.4977, 0.1751, 0.6424, 0.2082, 0.7479, 0.2487, 0.8770, 0.2893, 0.9518, 0.3299, 0.9915, 0.3771, 1.0377, 0.4242, 1.0410, 0.4714, 1.0375, 0.5246, 1.0335, 0.5779, 1.0207, 0.6311, 1.0131, 0.6899, 1.0047, 0.7488, 1.0009, 0.8076, 0.9994, 0.8718, 0.9979, 0.9359, 0.9986, 1.0000, 1.0000]
+
+  // The card just (un)favorited is "picked up" while it travels, then set down.
+  property string liftedPath: ""
+  Timer { id: liftTimer; interval: 380; onTriggered: root.liftedPath = "" }
 
   readonly property string cursorImage:
     grid.currentIndex >= 0 && grid.currentIndex < images.count ? images.get(grid.currentIndex).path : ""
@@ -111,6 +126,110 @@ Item {
     onFileChanged: reload()
   }
 
+  // ── Favorites (kept apart from state.json, which every apply rewrites) ──
+  FileView {
+    id: favFile
+    path: root.favoritesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      // Our own writes echo back here; skip stale ones while a save is queued.
+      if (favSaveProc.running || root.favDirty) return;
+      try {
+        var f = JSON.parse(String(text() || "[]"));
+        root.favorites = Array.isArray(f) ? f.map(String) : [];
+      } catch (e) { root.favorites = []; }
+      root.fillModel(root.cursorImage);
+    }
+    onFileChanged: reload()
+  }
+
+  // One writer at a time; a toggle during a write re-saves the latest list after it.
+  property bool favDirty: false
+  Process {
+    id: favSaveProc
+    onExited: if (root.favDirty) root.saveFavorites()
+  }
+  function saveFavorites() {
+    if (favSaveProc.running) { root.favDirty = true; return; }
+    root.favDirty = false;
+    favSaveProc.command = ["bash", "-c", "mkdir -p \"$1\" && printf '%s' \"$2\" > \"$3\"", "_",
+                           root.stateDir, JSON.stringify(root.favorites), root.favoritesPath];
+    favSaveProc.running = true;
+  }
+
+  function isFavorite(path) { return root.favorites.indexOf(path) >= 0; }
+
+  function toggleFavorite(path) {
+    if (!path) return;
+    var f = root.favorites.slice();
+    var i = f.indexOf(path);
+    if (i >= 0) f.splice(i, 1); else f.push(path);
+    root.favorites = f;
+    root.saveFavorites();
+    root.liftedPath = path;
+    liftTimer.restart();
+    root.fillModel(path, path);
+    root.toast(i >= 0 ? "Unfavorited" : "★ Favorited");
+  }
+
+  // Favorites first, then the rest; each group keeps name order.
+  function fillModel(keep, moved) {
+    var favs = [], rest = [];
+    for (var i = 0; i < root.entries.length; i++) {
+      var e = root.entries[i];
+      var row = { path: e.path, thumb: e.thumb, name: e.name, fav: root.isFavorite(e.path) };
+      (row.fav ? favs : rest).push(row);
+    }
+    var rows = favs.concat(rest);
+    root.favCount = favs.length;
+    if (root.reorderInPlace(rows, moved)) { root.glideTo(keep); return; }
+    images.clear();
+    rows.forEach(function (r) { images.append(r); });
+    root.placeCursor(keep || root.appliedImage);
+  }
+
+  // Same images, new order: move rows instead of rebuilding, so the grid's
+  // move/displaced transitions animate the change. False if the set differs.
+  property bool reordering: false
+  // `moved` is moved first as a single row, so only it runs the move transition
+  // and everything else is just displaced.
+  function reorderInPlace(rows, moved) {
+    if (images.count !== rows.length || rows.length === 0) return false;
+    var at = {};
+    for (var i = 0; i < images.count; i++) at[images.get(i).path] = i;
+    for (i = 0; i < rows.length; i++) if (at[rows[i].path] === undefined) return false;
+    root.reordering = true;
+    if (moved && at[moved] !== undefined) {
+      for (i = 0; i < rows.length; i++) if (rows[i].path === moved) break;
+      if (i !== at[moved]) images.move(at[moved], i, 1);
+    }
+    for (i = 0; i < rows.length; i++) {
+      var j = i;
+      while (images.get(j).path !== rows[i].path) j++;
+      if (j !== i) images.move(j, i, 1);
+      if (images.get(i).fav !== rows[i].fav) images.setProperty(i, "fav", rows[i].fav);
+    }
+    root.reordering = false;
+    return true;
+  }
+
+  // Keep the cursor on `path` and scroll to it smoothly instead of jumping.
+  function glideTo(path) {
+    var idx = -1;
+    for (var i = 0; i < images.count; i++) if (images.get(i).path === path) { idx = i; break; }
+    if (idx < 0) return;
+    root.reordering = true;
+    grid.currentIndex = idx;
+    root.reordering = false;
+    var from = grid.contentY;
+    grid.positionViewAtIndex(idx, GridView.Contain);
+    var to = grid.contentY;
+    grid.contentY = from;
+    scrollAnim.to = to;
+    scrollAnim.restart();
+  }
+
   // ── Listing ─────────────────────────────────────────────────────────────
   Process {
     id: listProc
@@ -118,15 +237,16 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         var keep = root.cursorImage;
-        images.clear();
+        var list = [];
         var lines = String(text || "").split("\n");
         for (var i = 0; i < lines.length; i++) {
           var parts = lines[i].split("\t");
           if (parts.length < 2 || !parts[0]) continue;
-          images.append({ path: parts[0], thumb: parts[1],
-                          name: parts[0].replace(/^.*\//, "").replace(/\.[^.]+$/, "") });
+          list.push({ path: parts[0], thumb: parts[1],
+                      name: parts[0].replace(/^.*\//, "").replace(/\.[^.]+$/, "") });
         }
-        root.placeCursor(keep || root.appliedImage);
+        root.entries = list;
+        root.fillModel(keep);
       }
     }
     stderr: StdioCollector {
@@ -311,6 +431,7 @@ Item {
           else if (t === "k") root.move(0, -1);
           else if (t === "j") root.move(0, 1);
           else if (t === "r") root.refresh();
+          else if (t === "f") root.toggleFavorite(root.cursorImage);
           else if (t === "q") root.dismiss();
           else if (t.length === 1 && t >= "1" && t <= String(root.profiles.length))
             root.profile = root.profiles[parseInt(t, 10) - 1].id;
@@ -360,6 +481,7 @@ Item {
               Text {
                 Layout.fillWidth: true
                 text: images.count + " wallpapers" +
+                  (root.favCount ? " · " + root.favCount + " favorites" : "") +
                   (root.appliedImage ? " · current: " + root.appliedImage.replace(/^.*\//, "") +
                     (root.appliedProfile ? " (" + root.labelFor(root.appliedProfile) + ")" : "") : "")
                 textFormat: Text.PlainText
@@ -448,7 +570,28 @@ Item {
             cellWidth: Math.floor(width / columns)
             cellHeight: Math.round(cellWidth * 9 / 16) + 26
 
-            onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, GridView.Contain)
+            onCurrentIndexChanged:
+              if (currentIndex >= 0 && !root.reordering) positionViewAtIndex(currentIndex, GridView.Contain)
+
+            // Favoriting moves one row in place: that card travels on a spring
+            // while the others slide aside on the same spring, all at once.
+            // (The lift itself is the delegate's `lifted` scale, cursor only.)
+            move: Transition {
+              NumberAnimation { properties: "x,y"; duration: 700
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: root.springSmooth }
+            }
+            displaced: Transition {
+              NumberAnimation { properties: "x,y"; duration: 700
+                                easing.type: Easing.BezierSpline; easing.bezierCurve: root.springSmooth }
+            }
+
+            NumberAnimation on contentY {
+              id: scrollAnim
+              running: false
+              duration: 700
+              easing.type: Easing.BezierSpline
+              easing.bezierCurve: root.springSmooth
+            }
 
             delegate: Item {
               id: cell
@@ -456,12 +599,39 @@ Item {
               required property string path
               required property string thumb
               required property string name
+              required property bool fav
               readonly property bool isCursor: GridView.isCurrentItem
               readonly property bool isApplied: path === root.appliedImage
 
               width: grid.cellWidth
               height: grid.cellHeight
-              z: isCursor ? 2 : 1
+              readonly property bool lifted: isCursor && path === root.liftedPath
+              z: lifted ? 3 : (isCursor ? 2 : 1)
+
+              // Picked up (1.06×, like a drag lift) while carried, set down after.
+              scale: lifted ? 1.06 : 1
+              Behavior on scale {
+                NumberAnimation { duration: 560; easing.type: Easing.BezierSpline
+                                  easing.bezierCurve: root.springSnappy }
+              }
+
+              onFavChanged: starPop.restart()
+
+              // Soft shadow that deepens as the card lifts (layered, no blur needed).
+              Repeater {
+                model: 4
+                delegate: Rectangle {
+                  required property int index
+                  anchors.fill: frame
+                  anchors.margins: -(index + 1) * 3
+                  anchors.topMargin: -(index + 1) * 3 + 10
+                  anchors.bottomMargin: -(index + 1) * 3 - 10
+                  radius: frame.radius + (index + 1) * 3
+                  color: "black"
+                  opacity: Math.max(0, Math.min(1, (cell.scale - 1) / 0.06)) * (0.14 - index * 0.03)
+                  visible: opacity > 0
+                }
+              }
 
               Rectangle {
                 id: frame
@@ -515,13 +685,46 @@ Item {
                 }
 
                 MouseArea {
+                  id: cellMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     grid.currentIndex = cell.index;
                     root.schedulePreview();
                     root.apply(cell.path);
                     root.dismiss();
+                  }
+                }
+
+                // Favorite badge: always shown when starred, a dim ☆ on hover otherwise.
+                Rectangle {
+                  id: starBadge
+                  anchors { top: img.top; right: img.right; margins: 6 }
+                  width: 24; height: 24
+                  radius: Math.min(12, root.hyprRounding)
+                  color: Util.alpha(Color.background, 0.75)
+                  visible: cell.fav || cellMouse.containsMouse || starMouse.containsMouse
+
+                  SequentialAnimation {
+                    id: starPop
+                    NumberAnimation { target: starBadge; property: "scale"; to: 1.35; duration: 110; easing.type: Easing.OutQuad }
+                    NumberAnimation { target: starBadge; property: "scale"; to: 1; duration: 560
+                                      easing.type: Easing.BezierSpline; easing.bezierCurve: root.springSnappy }
+                  }
+                  Text {
+                    anchors.centerIn: parent
+                    text: cell.fav ? "★" : "☆"
+                    color: cell.fav ? Color.accent : Util.alpha(Color.foreground, 0.7)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: starMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleFavorite(cell.path)
                   }
                 }
               }
@@ -541,7 +744,7 @@ Item {
           // ── Footer ──────────────────────────────────────────────────────
           Text {
             Layout.fillWidth: true
-            text: "←↓↑→ / hjkl move   ⏎ / click apply & close   Tab / ⇧Tab / 1–6 profile   r rescan   Esc close"
+            text: "←↓↑→ / hjkl move   ⏎ / click apply & close   Tab / ⇧Tab / 1–6 profile   f favorite   r rescan   Esc close"
             color: Util.alpha(Color.foreground, 0.4)
             font.family: Style.font.family
             font.pixelSize: Style.font.caption

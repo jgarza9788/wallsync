@@ -27,6 +27,7 @@ Requires `magick` (ImageMagick) and `python3`, both standard on Omarchy.
 | `←↓↑→` / `hjkl` | move |
 | `⏎` / click | apply and close |
 | `Tab` / `⇧Tab` / `1`–`6` | color profile |
+| `f` / click ☆ | toggle favorite (favorites stay at the top) |
 | `r` | rescan the folder |
 | `Esc` / `q` | close |
 
@@ -63,5 +64,7 @@ table in `bin/wallsync-palette`.
   `~/.config/omarchy/themes/wallsync/` (colors.toml + the one background) and runs
   `omarchy theme set wallsync`, which regenerates every app config from the
   palette. The last choice is saved in `~/.config/omarchy/jgarza.wallsync/state.json`.
+- Favorites are a JSON list of image paths in
+  `~/.config/omarchy/jgarza.wallsync/favorites.json`.
 
 To go back to a regular theme: `omarchy theme set <name>`.
