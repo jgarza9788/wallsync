@@ -362,6 +362,7 @@ Item {
                 text: images.count + " wallpapers" +
                   (root.appliedImage ? " · current: " + root.appliedImage.replace(/^.*\//, "") +
                     (root.appliedProfile ? " (" + root.labelFor(root.appliedProfile) + ")" : "") : "")
+                textFormat: Text.PlainText
                 color: Util.alpha(Color.foreground, 0.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
@@ -505,6 +506,7 @@ Item {
                   anchors { left: parent.left; right: parent.right; bottom: parent.bottom
                             leftMargin: 8; rightMargin: 8; bottomMargin: 4 }
                   text: (cell.isApplied ? "● " : "") + cell.name
+                  textFormat: Text.PlainText
                   color: cell.isCursor ? Color.accent : Util.alpha(Color.foreground, 0.6)
                   font.bold: cell.isCursor
                   font.family: Style.font.family
@@ -560,6 +562,7 @@ Item {
             id: toastLabel
             anchors.centerIn: parent
             text: root.toastText
+            textFormat: Text.PlainText
             color: Color.background
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
