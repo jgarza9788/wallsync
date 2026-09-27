@@ -68,3 +68,13 @@ table in `bin/wallsync-palette`.
   `~/.config/omarchy/jgarza.wallsync/favorites.json`.
 
 To go back to a regular theme: `omarchy theme set <name>`.
+
+## Uninstall
+
+```sh
+omarchy theme set <name>                                   # switch off the wallsync theme first
+omarchy plugin remove jgarza.wallsync
+rm -f ~/.local/share/applications/jgarza-wallsync.desktop
+# delete the "wallsync" line from ~/.config/omarchy/extensions/omarchy-menu.jsonc
+rm -rf ~/.config/omarchy/themes/wallsync ~/.config/omarchy/jgarza.wallsync ~/.cache/jgarza.wallsync
+```
