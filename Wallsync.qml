@@ -359,8 +359,10 @@ Item {
       return;
     }
     if (root.closing) return;
-    root.opened = false;
+    // closing first: the window is visible while opened || closing, and the
+    // other order flickers it false for a moment (unmap + remap) before the fade.
     root.closing = true;
+    root.opened = false;
     closeTimer.restart();
   }
   function finishClose() {
