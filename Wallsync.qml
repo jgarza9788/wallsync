@@ -34,7 +34,8 @@ Item {
     { id: "mute",     label: "Mute",     hint: "Restrained, reduced intensity" },
     { id: "deep",     label: "Deep",     hint: "Darker, more atmospheric" },
     { id: "vibrant",  label: "Vibrant",  hint: "Stronger, more expressive" },
-    { id: "balanced", label: "Balanced", hint: "Between image character and usability" }
+    { id: "balanced", label: "Balanced", hint: "Between image character and usability" },
+    { id: "neon",  label: "Neon",  hint: "Accent sets the saturation; every color matches it" }
   ]
 
   // ── State ────────────────────────────────────────────────────────────────
@@ -746,7 +747,7 @@ Item {
           // ── Footer ──────────────────────────────────────────────────────
           Text {
             Layout.fillWidth: true
-            text: "←↓↑→ / hjkl move   ⏎ / click apply & close   Tab / ⇧Tab / 1–6 profile   f favorite   r rescan   Esc close"
+            text: "←↓↑→ / hjkl move   ⏎ / click apply & close   Tab / ⇧Tab / 1–7 profile   f favorite   r rescan   Esc close"
             color: Util.alpha(Color.foreground, 0.4)
             font.family: Style.font.family
             font.pixelSize: Style.font.caption

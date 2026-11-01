@@ -3,7 +3,7 @@
 
 Usage: wallsync-palette <image> [profile] [--json]
 
-Profiles (same directions as Omagen): source, calm, mute, deep, vibrant, balanced
+Profiles (Omagen directions + neon): source, calm, mute, deep, vibrant, balanced, neon
 
 How it works
   1. Sample: ImageMagick quantizes the image to a weighted histogram.
@@ -245,6 +245,10 @@ PROFILES = {
                   "muted": T(0.95, 0.040, 0.20), "ansi": T(1.08, 0.15, 0.68),
                   "bright": T(1.10, 0.17, 0.70)},
     },
+    # neon: the Source palette, then every ANSI / bright color is set to the
+    # accent's chroma (see `equalize_chroma`), so the accent is the most
+    # saturated color and the rest match it.
+    "neon": {"dark": {}, "light": {}},
     "balanced": {
         "dark": {"bg": (0.16, 0.46), "surface": T(1.0, 0.045, 0.42, 1.04),
                  "accent": T(1.0, 0.135, 0.52), "selection": T(1.0, 0.075, 0.46, 1.04),
@@ -323,6 +327,45 @@ def enforce_contrast(p):
     return p
 
 
+# ── Neon saturation ───────────────────────────────────────────────────────
+
+NEON_KEYS = (*SLOTS, "brown",
+                *("bright_" + k for k in ("red", "yellow", "green", "cyan", "blue", "magenta")))
+
+
+def _reach(col, target, slide, direction):
+    """Lightest-touch lightness shift (toward `direction`, at most `slide`)
+    that lets `col` reach chroma `target`; else the shift that gets closest."""
+    best, best_c = col[0], -1.0
+    for i in range(0, 21):
+        l = clamp(col[0] + direction * slide * i / 20)
+        c = rgb_to_oklch(*oklch_to_rgb(l, target, col[2]))[1]
+        if c >= target - 0.002:
+            return l, c
+        if c > best_c:
+            best, best_c = l, c
+    return best, best_c
+
+
+def equalize_chroma(p):
+    """Make the accent vivid and give every ANSI / bright color its chroma.
+
+    The accent is pushed to a strong target chroma (sliding its lightness
+    toward the mid-range where the gamut is widest). Every other color then
+    aims for the accent's achieved chroma, sliding lightness a little when the
+    gamut needs it, so the accent stays the most saturated color.
+    """
+    toward_mid = -1 if p["mode"] == "dark" else 1
+    target = max(p["accent"][1] * 1.25, 0.15)
+    p["accent"][0], ac = _reach(p["accent"], target, 0.12, toward_mid)
+    p["accent"][1] = ac
+    for key in NEON_KEYS:
+        slide = 0.05 if key.startswith("bright_") else 0.10
+        p[key][0], _ = _reach(p[key], ac, slide, toward_mid)
+        p[key][1] = ac
+    return p
+
+
 # ── Output ───────────────────────────────────────────────────────────────────
 
 ORDER = [
@@ -338,6 +381,8 @@ ORDER = [
 
 def build(path, profile):
     p = enforce_contrast(apply_profile(source_palette(sample(path)), profile))
+    if profile == "neon":
+        p = enforce_contrast(equalize_chroma(p))
     return {k: (v if k == "mode" else to_hex(v)) for k, v in p.items()}
 
 
