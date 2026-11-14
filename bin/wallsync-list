@@ -24,10 +24,11 @@ thumb_for() {
   echo "$cache/$key.jpg"
 }
 
+# Bounds: skip files over 64 MB and list at most 2000 images.
 mapfile -d '' -t images < <(
-  find -L "$dir" -maxdepth 1 -type f \
+  find -L "$dir" -maxdepth 1 -type f -size -64M \
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' \) \
-    -print0 | sort -z
+    -print0 | sort -z | head -z -n 2000
 )
 
 missing=()
@@ -36,11 +37,33 @@ for img in "${images[@]}"; do
   [[ -s $t ]] || missing+=("$img"$'\t'"$t")
 done
 
-if (( ${#missing[@]} > 0 )); then
+# Each thumbnail runs under a hard deadline and ImageMagick resource limits.
+# The decoder is pinned from the file extension (png:, jpeg:, ...), so a file
+# whose content does not match its name fails instead of reaching ImageMagick's
+# format sniffing and its external delegates (SVG, PostScript, MVG, ...).
+# Work happens in a per-run temp dir that is removed on exit or signal, and each
+# thumbnail is renamed into place, so no partial .jpg is ever left behind.
+if (( ${#missing[@]} > 0 )) && command -v magick >/dev/null 2>&1; then
+  work=$(mktemp -d "$cache/.run.XXXXXX") || exit 1
+  export work
+  trap 'rm -rf "$work"' EXIT
+  trap 'exit 143' INT TERM HUP
   printf '%s\n' "${missing[@]}" |
     xargs -P "$(nproc)" -I{} bash -c '
       IFS=$'"'"'\t'"'"' read -r src dst <<<"$1"
-      magick "$src[0]" -thumbnail "480x270^" -gravity center -extent 480x270 -quality 85 "$dst" 2>/dev/null
+      case "${src##*.}" in
+        [jJ][pP][gG]|[jJ][pP][eE][gG]) c=jpeg ;;
+        [pP][nN][gG]) c=png ;;
+        [wW][eE][bB][pP]) c=webp ;;
+        [bB][mM][pP]) c=bmp ;;
+        [gG][iI][fF]) c=gif ;;
+        *) exit 0 ;;
+      esac
+      tmp=$(mktemp "$work/XXXXXX.jpg") || exit 0
+      if timeout -k 2 15 magick -limit memory 256MiB -limit map 512MiB -limit disk 1GiB \
+           -limit time 15 -limit width 20000 -limit height 20000 -limit area 128MP \
+           "$c:$src[0]" -thumbnail "480x270^" -gravity center -extent 480x270 -quality 85 "$tmp" 2>/dev/null
+      then mv -f "$tmp" "$dst"; else rm -f "$tmp"; fi
     ' _ {}
 fi
 

@@ -13,7 +13,18 @@ omarchy plugin add https://github.com/jgarza9788/wallsync.git --enable
 ~/.config/omarchy/plugins/jgarza.wallsync/extras/install.sh   # once: menu + launcher entry
 ```
 
-Requires `magick` (ImageMagick) and `python3`, both standard on Omarchy.
+Requires `magick` (ImageMagick) and `python3`, both standard on Omarchy, plus
+coreutils/findutils (`stat`, `md5sum`, `timeout`, `xargs`, `find`). If `magick` is
+missing, thumbnails fall back to the full image and palette generation exits with
+an error; nothing else is touched.
+
+Image decoding is bounded: every `magick` call runs under a 15–20 s deadline and
+ImageMagick limits (256 MiB memory, 1 GiB disk, 20000 px per side, 128 MP area);
+files over 64 MB are skipped and at most 2000 images are listed. Thumbnails are
+written to a per-run temp dir and renamed, so an interrupted run leaves no partial files.
+The decoder is pinned from the file extension (`png:`, `jpeg:`, `webp:`, `bmp:`, `gif:`), so a
+file whose content doesn't match its name is rejected rather than sniffed into ImageMagick's
+external delegates (SVG, PostScript, ...).
 
 ## Open it
 
