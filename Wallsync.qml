@@ -303,6 +303,7 @@ Item {
     stderr: StdioCollector { id: applyErr; waitForEnd: true }
     onExited: function (code) {
       root.applying = false;
+      root.fxApplyExited(code === 0);
       hyprReread.restart();
       if (code === 0) root.toast("Applied · " + root.labelFor(root.appliedProfile));
       else root.toast("Failed: " + (String(applyErr.text || "").trim().split("\n").pop() || ("exit " + code)));
@@ -315,7 +316,119 @@ Item {
     root.appliedProfile = root.profile;
     root.toast("Applying " + root.labelFor(root.profile) + "…");
     applyProc.command = ["bash", binPath("wallsync-apply"), path, root.profile];
+    if (!root.fxStart(path)) applyProc.running = true;   // else fxOldReady() starts it
+  }
+
+  // ── Wallpaper transition ────────────────────────────────────────────────
+  // The old wallpaper fades to black while the apply runs; once both are done
+  // the new one scales 80% → 100% and fades 0 → 1. Drawn on our own overlay
+  // above the shell's own cut transition, which plays out hidden underneath.
+  readonly property int fxOutMs: 350
+  readonly property int fxInMs: 600
+  readonly property real fxFromScale: 0.8
+  readonly property string fxOldSource: "file://" + homeDir + "/.local/state/omarchy/current/background"
+  property bool fxActive: false
+  property string fxNewSource: ""
+  property bool fxOutStarted: false   // old wallpaper is fading out
+  property bool fxOutDone: false
+  property bool fxApplyDone: false
+  property bool fxIn: false           // new wallpaper is scaling/fading in
+  property int fxOldReady: 0          // screens whose old image has loaded
+  property int fxNewReady: 0
+  readonly property int fxScreens: Math.max(1, Quickshell.screens.length)
+
+  function fxStart(path) {
+    if (Style.reduceMotion) return false;
+    root.fxOutStarted = false; root.fxOutDone = false; root.fxApplyDone = false; root.fxIn = false;
+    root.fxOldReady = 0; root.fxNewReady = 0;
+    root.fxNewSource = "file://" + path;
+    root.fxActive = true;
+    fxGuard.restart();
+    return true;
+  }
+  function fxAbort() {
+    fxGuard.stop(); fxOutTimer.stop(); fxEndTimer.stop();
+    root.fxActive = false;
+  }
+  // Every screen's old image is on screen: only now start fading and applying.
+  function fxOldLoaded() {
+    root.fxOldReady += 1;
+    if (root.fxOldReady < root.fxScreens || root.fxOutStarted) return;
+    root.fxOutStarted = true;
+    fxOutTimer.interval = Style.duration(root.fxOutMs);
+    fxOutTimer.restart();
     applyProc.running = true;
+  }
+  function fxBroken() {   // couldn't load an image (e.g. a video wallpaper): skip the effect
+    if (!root.fxActive) return;
+    var applyNeeded = !root.fxOutStarted;
+    root.fxAbort();
+    if (applyNeeded) applyProc.running = true;
+  }
+  function fxApplyExited(ok) {
+    if (!root.fxActive) return;
+    if (!ok) { root.fxAbort(); return; }
+    root.fxApplyDone = true;
+    root.fxAdvance();
+  }
+  function fxAdvance() {
+    if (!root.fxActive || root.fxIn) return;
+    if (!root.fxOutDone || !root.fxApplyDone || root.fxNewReady < root.fxScreens) return;
+    root.fxIn = true;
+    // The shell's own transition (~840ms) finishes under the overlay first.
+    fxEndTimer.interval = Style.duration(root.fxInMs + 450);
+    fxEndTimer.restart();
+  }
+  Timer { id: fxOutTimer; onTriggered: { root.fxOutDone = true; root.fxAdvance(); } }
+  Timer { id: fxEndTimer; onTriggered: root.fxAbort() }
+  Timer { id: fxGuard; interval: 20000; onTriggered: root.fxAbort() }   // never leave the screen covered
+
+  Variants {
+    model: root.fxActive ? Quickshell.screens : []
+
+    PanelWindow {
+      id: fxWin
+      required property var modelData
+      screen: modelData
+      anchors { top: true; bottom: true; left: true; right: true }
+      color: "black"
+      WlrLayershell.namespace: "omarchy-wallsync-fx"
+      WlrLayershell.layer: WlrLayer.Overlay
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+      exclusionMode: ExclusionMode.Ignore
+
+      Image {
+        id: oldImg
+        anchors.fill: parent
+        source: root.fxOldSource
+        sourceSize: Qt.size(fxWin.width, fxWin.height)
+        fillMode: Image.PreserveAspectCrop
+        cache: false
+        opacity: root.fxOutStarted ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: Style.duration(root.fxOutMs); easing.type: Easing.InOutQuad } }
+        onStatusChanged: {
+          if (status === Image.Ready) root.fxOldLoaded();
+          else if (status === Image.Error) root.fxBroken();
+        }
+      }
+
+      Image {
+        id: newImg
+        anchors.fill: parent
+        source: root.fxNewSource
+        sourceSize: Qt.size(fxWin.width, fxWin.height)
+        fillMode: Image.PreserveAspectCrop
+        cache: false
+        opacity: root.fxIn ? 1 : 0
+        scale: root.fxIn ? 1 : root.fxFromScale
+        Behavior on opacity { NumberAnimation { duration: Style.duration(root.fxInMs); easing.type: Easing.OutCubic } }
+        Behavior on scale { NumberAnimation { duration: Style.duration(root.fxInMs); easing.type: Easing.OutCubic } }
+        onStatusChanged: {
+          if (status === Image.Ready) { root.fxNewReady += 1; root.fxAdvance(); }
+          else if (status === Image.Error) root.fxBroken();
+        }
+      }
+    }
   }
 
   function knownProfile(id) {

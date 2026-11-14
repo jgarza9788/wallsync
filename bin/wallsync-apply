@@ -23,9 +23,12 @@ printf '%s' "$colors" >"$theme_dir/colors.toml"
 
 # Exactly one background, so theme-set always picks this image.
 find "$theme_dir/backgrounds" -mindepth 1 -delete
+# The name varies per image: omarchy keys on the path, so reusing one fixed name
+# would make a re-apply look like "same background" and nothing would change.
 ext=${image##*.}
-ln "$image" "$theme_dir/backgrounds/wallpaper.$ext" 2>/dev/null ||
-  cp "$image" "$theme_dir/backgrounds/wallpaper.$ext"
+key=$(printf '%s' "$image" | md5sum | cut -c1-8)
+bg="$theme_dir/backgrounds/wallpaper-$key.$ext"
+ln "$image" "$bg" 2>/dev/null || cp "$image" "$bg"
 
 python3 -c 'import json,sys; print(json.dumps({"image": sys.argv[1], "profile": sys.argv[2]}))' \
   "$image" "$profile" >"$state_dir/state.json"
