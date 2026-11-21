@@ -31,10 +31,20 @@ mapfile -d '' -t images < <(
     -print0 | sort -z | head -z -n 2000
 )
 
+# Output is one "<image>\t<thumbnail>" line per wallpaper, so a name holding a
+# tab, newline or other control character could forge extra records. Such
+# files are skipped entirely.
+safe=()
+for img in "${images[@]}"; do
+  [[ $img == *[[:cntrl:]]* ]] && continue
+  safe+=("$img")
+done
+images=("${safe[@]}")
+
 missing=()
 for img in "${images[@]}"; do
   t=$(thumb_for "$img")
-  [[ -s $t ]] || missing+=("$img"$'\t'"$t")
+  [[ -s $t ]] || missing+=("$img")
 done
 
 # Each thumbnail runs under a hard deadline and ImageMagick resource limits.
@@ -43,14 +53,19 @@ done
 # format sniffing and its external delegates (SVG, PostScript, MVG, ...).
 # Work happens in a per-run temp dir that is removed on exit or signal, and each
 # thumbnail is renamed into place, so no partial .jpg is ever left behind.
+# Workers get only the source path (NUL-separated) and work out the thumbnail
+# path themselves; it must be $cache/<16 hex>.jpg or nothing is written.
 if (( ${#missing[@]} > 0 )) && command -v magick >/dev/null 2>&1; then
   work=$(mktemp -d "$cache/.run.XXXXXX") || exit 1
-  export work
+  export work cache
+  export -f thumb_for
   trap 'rm -rf "$work"' EXIT
   trap 'exit 143' INT TERM HUP
-  printf '%s\n' "${missing[@]}" |
-    xargs -P "$(nproc)" -I{} bash -c '
-      IFS=$'"'"'\t'"'"' read -r src dst <<<"$1"
+  printf '%s\0' "${missing[@]}" |
+    xargs -0 -r -n 1 -P "$(nproc)" bash -c '
+      src=$1
+      dst=$(thumb_for "$src") || exit 0
+      [[ $dst =~ ^"$cache"/[0-9a-f]{16}\.jpg$ ]] || exit 0
       case "${src##*.}" in
         [jJ][pP][gG]|[jJ][pP][eE][gG]) c=jpeg ;;
         [pP][nN][gG]) c=png ;;
@@ -63,8 +78,8 @@ if (( ${#missing[@]} > 0 )) && command -v magick >/dev/null 2>&1; then
       if timeout -k 2 15 magick -limit memory 256MiB -limit map 512MiB -limit disk 1GiB \
            -limit time 15 -limit width 20000 -limit height 20000 -limit area 128MP \
            "$c:$src[0]" -thumbnail "480x270^" -gravity center -extent 480x270 -quality 85 "$tmp" 2>/dev/null
-      then mv -f "$tmp" "$dst"; else rm -f "$tmp"; fi
-    ' _ {}
+      then mv -f -- "$tmp" "$dst"; else rm -f "$tmp"; fi
+    ' _
 fi
 
 for img in "${images[@]}"; do

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jgarza.wallsync",
   "name": "Wallsync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "jgarza",
   "license": "MIT",
   "description": "Pick a wallpaper from a grid of ~/Pictures/Wallpapers; it becomes the background and the whole Omarchy palette is generated from it, with a choice of color profiles.",
